@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/aruru-weed/streammux"
+	"github.com/aruzen/streammux"
 )
 
 var (

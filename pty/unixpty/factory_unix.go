@@ -13,7 +13,7 @@ import (
 	"os/exec"
 	"sync"
 
-	"github.com/aruru-weed/streammux/pty"
+	"github.com/aruzen/streammux/pty"
 	creackpty "github.com/creack/pty"
 	"golang.org/x/sys/unix"
 )

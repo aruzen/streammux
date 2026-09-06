@@ -8,8 +8,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/aruru-weed/streammux"
-	"github.com/aruru-weed/streammux/pty"
+	"github.com/aruzen/streammux"
+	"github.com/aruzen/streammux/pty"
 )
 
 type memoryProcess struct {

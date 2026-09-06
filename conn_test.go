@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/aruru-weed/streammux"
+	"github.com/aruzen/streammux"
 )
 
 func TestConnSerializesConcurrentFrames(t *testing.T) {

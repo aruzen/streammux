@@ -1,4 +1,4 @@
-module github.com/aruru-weed/streammux
+module github.com/aruzen/streammux
 
 go 1.27.0
 

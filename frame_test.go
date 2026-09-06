@@ -8,7 +8,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/aruru-weed/streammux"
+	"github.com/aruzen/streammux"
 )
 
 func TestFrameWireLayout(t *testing.T) {

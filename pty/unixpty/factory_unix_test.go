@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aruru-weed/streammux/pty"
-	"github.com/aruru-weed/streammux/pty/unixpty"
+	"github.com/aruzen/streammux/pty"
+	"github.com/aruzen/streammux/pty/unixpty"
 )
 
 func TestInteractiveProcessIOAndExit(t *testing.T) {
