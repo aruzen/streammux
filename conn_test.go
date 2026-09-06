@@ -2,7 +2,6 @@ package streammux_test
 
 import (
 	"context"
-	"errors"
 	"net"
 	"sync"
 	"testing"
@@ -72,7 +71,7 @@ func TestContextCancellationUnblocksRead(t *testing.T) {
 	if err = <-result; err == nil {
 		t.Fatal("ReadFrame succeeded after cancellation")
 	}
-	if closeErr := conn.Close(); closeErr != nil && !errors.Is(closeErr, net.ErrClosed) {
+	if closeErr := conn.Close(); closeErr != nil {
 		t.Fatalf("Close = %v", closeErr)
 	}
 }

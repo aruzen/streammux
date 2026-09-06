@@ -160,7 +160,7 @@ func (c *Conn) Close() error {
 		}
 	})
 	err := c.Err()
-	if errors.Is(err, context.Canceled) {
+	if errors.Is(err, context.Canceled) || errors.Is(err, io.ErrClosedPipe) {
 		return nil
 	}
 	return err
