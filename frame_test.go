@@ -52,6 +52,17 @@ func TestNewFrameOwnsCallerPayload(t *testing.T) {
 	}
 }
 
+func TestNewOwnedFrameTakesPayloadWithoutCopy(t *testing.T) {
+	payload := []byte("owned")
+	frame, err := streammux.NewOwnedFrame(streammux.Header{Version: 1, MessageType: 1, Flags: streammux.FlagEvent, StreamID: 1}, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if &frame.Payload[0] != &payload[0] {
+		t.Fatal("NewOwnedFrame copied payload")
+	}
+}
+
 func TestDecoderRejectsOversizedBeforePayloadRead(t *testing.T) {
 	header := make([]byte, streammux.HeaderSize)
 	binary.BigEndian.PutUint32(header[0:4], 1025)
@@ -87,5 +98,33 @@ func TestApplicationValidator(t *testing.T) {
 	frame := streammux.Frame{Header: streammux.Header{PayloadLength: 0, Version: 1, MessageType: 9, Flags: streammux.FlagEvent, StreamID: 1}}
 	if err := frame.Validate(config); !errors.Is(err, want) {
 		t.Fatalf("Validate = %v", err)
+	}
+}
+
+func FuzzDecoder(f *testing.F) {
+	f.Add([]byte{})
+	f.Add(make([]byte, streammux.HeaderSize))
+	f.Add([]byte{0, 0, 0, 1, 0, 1, 0, 1})
+	f.Fuzz(func(t *testing.T, data []byte) {
+		config := streammux.DefaultConfig()
+		config.MaxFrameBytes = 64 * 1024
+		_, _ = streammux.NewDecoder(bytes.NewReader(data), config).ReadFrame()
+	})
+}
+
+func BenchmarkOwnedFrameEncoding20Streams(b *testing.B) {
+	payload := bytes.Repeat([]byte("x"), 4096)
+	encoder := streammux.NewEncoder(io.Discard, streammux.DefaultConfig())
+	b.ReportAllocs()
+	b.SetBytes(int64(len(payload)))
+	b.ResetTimer()
+	for index := range b.N {
+		frame, err := streammux.NewOwnedFrame(streammux.Header{Version: 1, MessageType: 1, Flags: streammux.FlagEvent, StreamID: streammux.StreamID(index%20 + 1)}, payload)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if err = encoder.WriteFrame(frame); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
