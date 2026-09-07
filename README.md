@@ -2,7 +2,8 @@
 
 `streammux` multiplexes opaque byte streams and typed request, response, and
 event frames over one `io.ReadWriteCloser`. It also provides a semantic PTY
-interface, a PTY-to-frame bridge, and a Linux/macOS PTY backend.
+interface, a PTY-to-frame bridge, and native PTY backends for Linux, macOS, and
+Windows.
 
 The framing core is independent of PTYs, JSON, operating systems, and
 application message definitions.
@@ -123,9 +124,15 @@ Existing oct code can continue using the stable low-level `Conn`,
 `pty.Factory`, `pty.Process`, and `pty.Bridge` APIs while migrating
 independently.
 
-Windows ConPTY/Job Object support and application capability negotiation are
-outside the current release scope. Core and protocol packages still compile on
-Windows; `pty/unixpty` targets Linux and macOS.
+On Windows 10 version 1809 or newer, use `windowspty.ManagedFactory{}`. It uses
+ConPTY for terminal I/O and resize and assigns the complete client process tree
+to a kill-on-close Job Object at process creation. `Terminate` sends the
+ConPTY `CTRL_CLOSE_EVENT`; `Kill` force-terminates the Job Object. As with any
+terminal, ConPTY may interpret control bytes and normalize VT sequences; the
+backend does not perform additional parsing or transformation.
+
+Application capability negotiation remains outside the current release scope.
+`pty/unixpty` targets Linux and macOS, while `pty/windowspty` targets Windows.
 
 `Conn.Send` copies its payload. `Conn.SendOwned` transfers ownership and avoids
 that copy; the caller must never mutate or reuse the payload after the call.

@@ -41,3 +41,12 @@ jobs:
         with:
           go-version: "1.27.x"
       - run: go test -race -count=10 ./pty/...
+
+  windows-integration:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.x"
+      - run: go test -race -count=10 ./pty/windowspty
