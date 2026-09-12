@@ -226,6 +226,46 @@ func TestSlowAttachmentOverflowDoesNotStopSession(t *testing.T) {
 	}
 }
 
+func TestReplayLargerThanAttachmentQueueStreamsBeforeLiveOutput(t *testing.T) {
+	factory := &managedTestFactory{}
+	config := pty.DefaultManagerConfig()
+	config.HistoryBytes = 16
+	config.MaxTotalHistoryBytes = 16
+	config.AttachmentQueueBytes = 4
+	manager, err := pty.NewManager(context.Background(), factory, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	session, err := manager.Open(context.Background(), pty.ProcessSpec{Command: "shell", InitialSize: pty.Size{Cols: 80, Rows: 24}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for sequence, data := range []string{"aaaa", "bbbb", "cccc"} {
+		go factory.process(0).write(data)
+		waitSessionSequence(t, session, uint64(sequence+1))
+	}
+	sink := &collectingOutput{events: make(chan pty.OutputEvent, 4)}
+	attachment, result, err := session.Attach(context.Background(), pty.AttachOptions{Replay: pty.ReplayHistory, Paused: true}, sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer attachment.Close()
+	if result.ReplayFirst != 1 || result.ReplayLast != 3 || result.NextLive != 4 || result.Truncated {
+		t.Fatalf("AttachResult = %#v", result)
+	}
+
+	go factory.process(0).write("live")
+	waitSessionSequence(t, session, 4)
+	if err = attachment.Activate(); err != nil {
+		t.Fatal(err)
+	}
+	for sequence, data := range []string{"aaaa", "bbbb", "cccc", "live"} {
+		assertOutputEvent(t, sink.events, uint64(sequence+1), data)
+	}
+}
+
 func TestManagerCloseTerminatesAndReapsAllProcesses(t *testing.T) {
 	factory := &managedTestFactory{}
 	config := pty.DefaultManagerConfig()

@@ -37,6 +37,9 @@ type ManagerConfig struct {
 	HistoryBytes         int
 	MaxTotalHistoryBytes int64
 	ReadBufferBytes      int
+	// AttachmentQueueBytes bounds live output waiting for an attachment sink.
+	// Replay is bounded separately by HistoryBytes and is streamed ahead of
+	// this queue.
 	AttachmentQueueBytes int
 	ObserverQueueBytes   int
 	MaxObservers         int
@@ -143,9 +146,9 @@ const (
 type AttachOptions struct {
 	Replay      ReplayMode
 	ResumeAfter uint64
-	// Paused queues replay/live output but does not invoke OutputSink until
-	// Activate is called. Protocol adapters use this to send AttachResponse
-	// before replay.
+	// Paused holds replay and queues live output but does not invoke OutputSink
+	// until Activate is called. Protocol adapters use this to send
+	// AttachResponse before replay.
 	Paused bool
 }
 
@@ -156,7 +159,7 @@ type OutputEvent struct {
 	Data     []byte
 }
 
-// AttachmentEventKind identifies an item in an attachment's ordered queue.
+// AttachmentEventKind identifies an item in an attachment's ordered delivery.
 type AttachmentEventKind string
 
 const (
@@ -738,9 +741,10 @@ func (s *Session) Resize(ctx context.Context, size Size) error {
 	return nil
 }
 
-// Attach creates a bounded queue that serializes replay, live output, and one
-// terminal exit event into sink. ctx owns the attachment lifetime but never
-// the Session lifetime. On success the caller should eventually call Close.
+// Attach serializes replay, a bounded live-output queue, and one terminal exit
+// event into sink. Replay is bounded by the Manager history limits and does not
+// consume AttachmentQueueBytes. ctx owns the attachment lifetime but never the
+// Session lifetime. On success the caller should eventually call Close.
 func (s *Session) Attach(ctx context.Context, options AttachOptions, sink OutputSink) (*Attachment, AttachResult, error) {
 	if ctx == nil {
 		return nil, AttachResult{}, errors.New("pty: nil Attach context")
@@ -782,8 +786,8 @@ func (s *Session) Attach(ctx context.Context, options AttachOptions, sink Output
 		m.mu.Unlock()
 		return nil, AttachResult{}, ErrAttachmentLimit
 	}
-	a := newAttachment(ctx, s, id, sink, m.config.AttachmentQueueBytes, !options.Paused)
 	result := AttachResult{NextLive: s.lastSequence + 1}
+	var replay []OutputEvent
 	if options.Replay == ReplayHistory {
 		if len(s.history) > 0 && options.ResumeAfter+1 < s.history[0].Sequence {
 			result.Truncated = true
@@ -796,14 +800,10 @@ func (s *Session) Attach(ctx context.Context, options AttachOptions, sink Output
 				result.ReplayFirst = chunk.Sequence
 			}
 			result.ReplayLast = chunk.Sequence
-			replay := chunk.OutputEvent
-			if err := a.enqueueLocked(AttachmentEvent{Kind: AttachmentOutput, Output: &replay}); err != nil {
-				m.mu.Unlock()
-				a.finish(err, AttachmentQueueOverflow)
-				return nil, AttachResult{}, err
-			}
+			replay = append(replay, chunk.OutputEvent)
 		}
 	}
+	a := newAttachment(ctx, s, id, sink, m.config.AttachmentQueueBytes, !options.Paused, replay)
 	if s.state == SessionExited && s.exit != nil {
 		if err := a.enqueueExitLocked(*s.exit); err != nil {
 			m.mu.Unlock()
@@ -1134,14 +1134,16 @@ func (m *Manager) removeHistoryLocked(s *Session) {
 	s.historyBytes = 0
 }
 
-// Attachment owns one sink worker and its bounded ordered queue. It does not
-// own or stop its Session.
+// Attachment owns one sink worker, an immutable replay cursor, and a bounded
+// live-output queue. It does not own or stop its Session.
 type Attachment struct {
 	session    *Session
 	id         uint64
 	sink       OutputSink
 	maxBytes   int
 	mu         sync.Mutex
+	replay     []OutputEvent
+	replayNext int
 	queue      []AttachmentEvent
 	bytes      int
 	active     bool
@@ -1160,9 +1162,9 @@ type Attachment struct {
 	stopParent func() bool
 }
 
-func newAttachment(parent context.Context, s *Session, id uint64, sink OutputSink, maxBytes int, active bool) *Attachment {
+func newAttachment(parent context.Context, s *Session, id uint64, sink OutputSink, maxBytes int, active bool, replay []OutputEvent) *Attachment {
 	ctx, cancel := context.WithCancel(s.manager.ctx)
-	a := &Attachment{session: s, id: id, sink: sink, maxBytes: maxBytes, active: active, changed: make(chan struct{}), done: make(chan struct{}), ctx: ctx, cancel: cancel}
+	a := &Attachment{session: s, id: id, sink: sink, maxBytes: maxBytes, replay: replay, active: active, changed: make(chan struct{}), done: make(chan struct{}), ctx: ctx, cancel: cancel}
 	a.stopParent = context.AfterFunc(parent, func() { a.close(AttachmentContextCanceled) })
 	return a
 }
@@ -1250,6 +1252,8 @@ func (a *Attachment) finish(err error, reason AttachmentCloseReason) {
 		a.closed = true
 		a.err = err
 		a.reason = reason
+		a.replay = nil
+		a.replayNext = 0
 		a.queue = nil
 		a.bytes = 0
 		a.signalLocked()
@@ -1274,12 +1278,13 @@ func (a *Attachment) run() {
 			a.mu.Unlock()
 			return
 		}
-		if a.closing && len(a.queue) == 0 {
+		replayPending := a.replayNext < len(a.replay)
+		if a.closing && !replayPending && len(a.queue) == 0 {
 			a.mu.Unlock()
 			a.finish(nil, AttachmentSessionExited)
 			return
 		}
-		if !a.active || len(a.queue) == 0 {
+		if !a.active || (!replayPending && len(a.queue) == 0) {
 			changed := a.changed
 			a.mu.Unlock()
 			select {
@@ -1294,9 +1299,20 @@ func (a *Attachment) run() {
 				return
 			}
 		}
-		event := a.queue[0]
-		a.queue = a.queue[1:]
-		a.bytes -= attachmentEventBytes(event)
+		var event AttachmentEvent
+		if replayPending {
+			output := a.replay[a.replayNext]
+			a.replayNext++
+			event = AttachmentEvent{Kind: AttachmentOutput, Output: &output}
+			if a.replayNext == len(a.replay) {
+				a.replay = nil
+				a.replayNext = 0
+			}
+		} else {
+			event = a.queue[0]
+			a.queue = a.queue[1:]
+			a.bytes -= attachmentEventBytes(event)
+		}
 		a.signalLocked()
 		a.mu.Unlock()
 		if err := a.sink.Send(a.ctx, event); err != nil {
