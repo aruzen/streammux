@@ -6,6 +6,7 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -296,6 +297,70 @@ func TestPeerInboundOverflowIsCountedAndLocalized(t *testing.T) {
 	}
 	close(blocked)
 	cleanup()
+}
+
+func TestPeerInboundBackpressurePreservesBoundedQueueAndConnection(t *testing.T) {
+	serverConfig := streammux.DefaultPeerConfig()
+	serverConfig.PerStreamQueueBytes = streammux.HeaderSize + 1
+	serverConfig.PerStreamQueueFrames = 1
+	serverConfig.InboundQueuePolicy = streammux.InboundQueueBackpressure
+	client, server, cleanup := peerPairConfigs(t, streammux.DefaultPeerConfig(), serverConfig)
+	defer cleanup()
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	defer unblock()
+	started := make(chan struct{})
+	handled := make(chan byte, 3)
+	var calls atomic.Uint64
+	if err := server.Register(49, func(_ context.Context, _ *streammux.Peer, frame streammux.Frame) error {
+		if calls.Add(1) == 1 {
+			close(started)
+			<-release
+		}
+		handled <- frame.Payload[0]
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	send := func(value byte) {
+		frame, _ := streammux.NewFrame(streammux.Header{Version: 1, MessageType: 49, Flags: streammux.FlagEvent, StreamID: 1}, []byte{value})
+		if err := client.Emit(context.Background(), frame); err != nil {
+			t.Fatal(err)
+		}
+	}
+	send('a')
+	<-started
+	send('b')
+	send('c')
+
+	deadline := time.Now().Add(time.Second)
+	for server.Stats().InboundBackpressureWaits != 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("Peer did not apply inbound backpressure")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	stats := server.Stats()
+	if stats.QueueOverflows != 0 || stats.InboundQueueBytes > serverConfig.PerStreamQueueBytes || stats.InboundQueueFrames > 1 {
+		t.Fatalf("backpressure stats = %#v", stats)
+	}
+	select {
+	case <-server.Done():
+		t.Fatalf("backpressure closed Peer: %v", server.Err())
+	default:
+	}
+	unblock()
+	for _, expected := range []byte{'a', 'b', 'c'} {
+		select {
+		case actual := <-handled:
+			if actual != expected {
+				t.Fatalf("handled %q, want %q", actual, expected)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("handler did not receive %q", expected)
+		}
+	}
 }
 
 func TestPeerCloseUnblocksPendingCall(t *testing.T) {

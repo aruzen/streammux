@@ -7,6 +7,14 @@ import (
 	"time"
 )
 
+func TestPeerConfigRejectsInvalidInboundQueuePolicy(t *testing.T) {
+	config := DefaultPeerConfig()
+	config.InboundQueuePolicy = InboundQueuePolicy(2)
+	if _, err := config.withDefaults(); err == nil {
+		t.Fatal("invalid inbound queue policy was accepted")
+	}
+}
+
 func TestReservePendingWrapsCorrelationIDWithoutZero(t *testing.T) {
 	p := &Peer{pending: make(map[CorrelationID]*peerPending), canceled: make(map[CorrelationID]peerPending)}
 	p.next.Store(math.MaxUint64 - 1)

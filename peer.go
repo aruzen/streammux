@@ -30,6 +30,20 @@ const (
 	TrafficBulk
 )
 
+// InboundQueuePolicy selects what happens when a per-stream handler queue is
+// full. Backpressure keeps the queue bounded by pausing transport reads, but a
+// slow handler can consequently delay traffic for other streams.
+type InboundQueuePolicy uint8
+
+const (
+	// InboundQueueFail closes the Peer when a handler queue cannot accept a
+	// complete frame. This is the default.
+	InboundQueueFail InboundQueuePolicy = iota
+	// InboundQueueBackpressure pauses transport reads until the handler queue
+	// has capacity.
+	InboundQueueBackpressure
+)
+
 // PeerConfig bounds Peer resources and configures weighted scheduling. Zero
 // fields use DefaultPeerConfig values. Classify is called synchronously by
 // Emit without internal locks held and must be safe for concurrent use.
@@ -38,12 +52,14 @@ type PeerConfig struct {
 	OutboundQueueFrames  int
 	PerStreamQueueBytes  int
 	PerStreamQueueFrames int
-	MaxActiveStreams     int
-	MaxCanceledRequests  int
-	ControlWeight        int
-	InteractiveWeight    int
-	BulkWeight           int
-	Classify             func(Frame) TrafficClass
+	// InboundQueuePolicy controls full inbound handler queues.
+	InboundQueuePolicy  InboundQueuePolicy
+	MaxActiveStreams    int
+	MaxCanceledRequests int
+	ControlWeight       int
+	InteractiveWeight   int
+	BulkWeight          int
+	Classify            func(Frame) TrafficClass
 }
 
 // DefaultPeerConfig returns production-oriented bounded queue defaults.
@@ -93,6 +109,9 @@ func (c PeerConfig) withDefaults() (PeerConfig, error) {
 	}
 	if c.PerStreamQueueFrames > c.OutboundQueueFrames {
 		return c, errors.New("streammux: per-stream frame queue exceeds outbound queue")
+	}
+	if c.InboundQueuePolicy != InboundQueueFail && c.InboundQueuePolicy != InboundQueueBackpressure {
+		return c, errors.New("streammux: invalid inbound queue policy")
 	}
 	if c.Classify == nil {
 		c.Classify = func(frame Frame) TrafficClass {
@@ -145,25 +164,26 @@ type Peer struct {
 	conn   *Conn
 	config PeerConfig
 
-	mu             sync.Mutex
-	handlers       map[MessageType]Handler
-	pending        map[CorrelationID]*peerPending
-	canceled       map[CorrelationID]peerPending
-	canceledOrder  []CorrelationID
-	inbound        map[StreamID]*inboundStream
-	outbound       map[StreamID]*outboundStream
-	outboundOrder  []StreamID
-	outboundBytes  int
-	outboundFrames int
-	receivedFrames uint64
-	receivedBytes  uint64
-	sentFrames     uint64
-	sentBytes      uint64
-	protocolErrors uint64
-	queueOverflows uint64
-	changed        chan struct{}
-	closed         bool
-	err            error
+	mu                sync.Mutex
+	handlers          map[MessageType]Handler
+	pending           map[CorrelationID]*peerPending
+	canceled          map[CorrelationID]peerPending
+	canceledOrder     []CorrelationID
+	inbound           map[StreamID]*inboundStream
+	outbound          map[StreamID]*outboundStream
+	outboundOrder     []StreamID
+	outboundBytes     int
+	outboundFrames    int
+	receivedFrames    uint64
+	receivedBytes     uint64
+	sentFrames        uint64
+	sentBytes         uint64
+	protocolErrors    uint64
+	queueOverflows    uint64
+	backpressureWaits uint64
+	changed           chan struct{}
+	closed            bool
+	err               error
 
 	next      atomic.Uint64
 	serveOnce atomic.Bool
@@ -187,21 +207,22 @@ type PeerStreamStats struct {
 // PeerStats contains cumulative traffic/error counters and current resource
 // use. Byte counters include the fixed frame header and never payload contents.
 type PeerStats struct {
-	ReceivedFrames        uint64
-	ReceivedBytes         uint64
-	SentFrames            uint64
-	SentBytes             uint64
-	ProtocolErrors        uint64
-	QueueOverflows        uint64
-	PendingRequests       int
-	CanceledRequests      int
-	ActiveInboundStreams  int
-	ActiveOutboundStreams int
-	InboundQueueBytes     int
-	InboundQueueFrames    int
-	OutboundQueueBytes    int
-	OutboundQueueFrames   int
-	Streams               []PeerStreamStats
+	ReceivedFrames           uint64
+	ReceivedBytes            uint64
+	SentFrames               uint64
+	SentBytes                uint64
+	ProtocolErrors           uint64
+	QueueOverflows           uint64
+	InboundBackpressureWaits uint64
+	PendingRequests          int
+	CanceledRequests         int
+	ActiveInboundStreams     int
+	ActiveOutboundStreams    int
+	InboundQueueBytes        int
+	InboundQueueFrames       int
+	OutboundQueueBytes       int
+	OutboundQueueFrames      int
+	Streams                  []PeerStreamStats
 }
 
 // NewPeer takes ownership of conn on success and starts its outbound worker.
@@ -373,37 +394,58 @@ func (p *Peer) Serve(ctx context.Context) error {
 }
 
 func (p *Peer) dispatch(frame Frame) error {
-	p.mu.Lock()
-	if p.closed {
-		p.mu.Unlock()
-		return ErrPeerClosed
-	}
-	handler := p.handlers[frame.Header.MessageType]
-	if handler == nil {
-		p.mu.Unlock()
-		return fmt.Errorf("%w: %d", ErrHandlerNotFound, frame.Header.MessageType)
-	}
-	state := p.inbound[frame.Header.StreamID]
-	if state == nil {
-		if len(p.inbound) >= p.config.MaxActiveStreams {
-			p.mu.Unlock()
-			return ErrTooManyActiveStreams
-		}
-		state = &inboundStream{}
-		p.inbound[frame.Header.StreamID] = state
-		p.workers.Add(1)
-		go p.runInbound(frame.Header.StreamID, state)
-	}
 	bytes := len(frame.Payload) + HeaderSize
-	if state.bytes+bytes > p.config.PerStreamQueueBytes || len(state.frames)+1 > p.config.PerStreamQueueFrames {
-		p.queueOverflows++
+	waited := false
+	for {
+		p.mu.Lock()
+		if p.closed {
+			p.mu.Unlock()
+			return p.result()
+		}
+		handler := p.handlers[frame.Header.MessageType]
+		if handler == nil {
+			p.mu.Unlock()
+			return fmt.Errorf("%w: %d", ErrHandlerNotFound, frame.Header.MessageType)
+		}
+		state := p.inbound[frame.Header.StreamID]
+		if state == nil {
+			if len(p.inbound) >= p.config.MaxActiveStreams {
+				p.mu.Unlock()
+				return ErrTooManyActiveStreams
+			}
+			state = &inboundStream{}
+			p.inbound[frame.Header.StreamID] = state
+			p.workers.Add(1)
+			go p.runInbound(frame.Header.StreamID, state)
+		}
+		if bytes > p.config.PerStreamQueueBytes {
+			p.queueOverflows++
+			p.mu.Unlock()
+			return ErrPeerQueueOverflow
+		}
+		if state.bytes+bytes <= p.config.PerStreamQueueBytes && len(state.frames)+1 <= p.config.PerStreamQueueFrames {
+			state.bytes += bytes
+			state.frames = append(state.frames, frame)
+			p.mu.Unlock()
+			return nil
+		}
+		if p.config.InboundQueuePolicy == InboundQueueFail {
+			p.queueOverflows++
+			p.mu.Unlock()
+			return ErrPeerQueueOverflow
+		}
+		if !waited {
+			p.backpressureWaits++
+			waited = true
+		}
+		changed := p.changed
 		p.mu.Unlock()
-		return ErrPeerQueueOverflow
+		select {
+		case <-changed:
+		case <-p.done:
+			return p.result()
+		}
 	}
-	state.bytes += bytes
-	state.frames = append(state.frames, frame)
-	p.mu.Unlock()
-	return nil
 }
 
 func (p *Peer) runInbound(id StreamID, state *inboundStream) {
@@ -713,7 +755,7 @@ func (p *Peer) Stats() PeerStats {
 	stats := PeerStats{
 		ReceivedFrames: p.receivedFrames, ReceivedBytes: p.receivedBytes,
 		SentFrames: p.sentFrames, SentBytes: p.sentBytes,
-		ProtocolErrors: p.protocolErrors, QueueOverflows: p.queueOverflows,
+		ProtocolErrors: p.protocolErrors, QueueOverflows: p.queueOverflows, InboundBackpressureWaits: p.backpressureWaits,
 		PendingRequests: len(p.pending), CanceledRequests: len(p.canceled), ActiveInboundStreams: len(p.inbound),
 		ActiveOutboundStreams: len(p.outbound), OutboundQueueBytes: p.outboundBytes,
 		OutboundQueueFrames: p.outboundFrames,
