@@ -109,6 +109,11 @@ availability. Manager observers receive `Attached`/`Detached` events with a
 semantic close reason and `Retained`/`Evicted`/`Removed` lifecycle events.
 `ManagerStats` reports total registered and active Session counts separately.
 
+`Session.ProcessID` explicitly exposes the root operating-system process ID
+only while the Session is running and its backend implements the optional
+`pty.ProcessIDProvider` capability. Process IDs are intentionally excluded from
+`SessionInfo`, protocol responses, and observer events.
+
 Output/history byte slices are immutable and may be retained by consumers.
 They must not be modified. PTY Input and Output frame payloads are raw bytes;
 the library performs no ANSI/VT parsing or transformation. `Peer.Stats` and

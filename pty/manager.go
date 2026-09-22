@@ -663,6 +663,29 @@ func (s *Session) Info() SessionInfo {
 	defer s.manager.mu.Unlock()
 	return s.infoLocked()
 }
+
+// ProcessID returns the root operating-system process identifier while the
+// Session is running. It is intentionally excluded from SessionInfo so callers
+// must explicitly request this security-sensitive process identity.
+func (s *Session) ProcessID() (uint64, error) {
+	s.manager.mu.Lock()
+	defer s.manager.mu.Unlock()
+	if s.state != SessionRunning {
+		return 0, ErrSessionExited
+	}
+	provider, ok := s.process.(ProcessIDProvider)
+	if !ok {
+		return 0, ErrProcessIDUnavailable
+	}
+	pid, err := provider.ProcessID()
+	if err != nil {
+		return 0, err
+	}
+	if pid == 0 {
+		return 0, ErrProcessIDUnavailable
+	}
+	return pid, nil
+}
 func (s *Session) infoLocked() SessionInfo {
 	info := SessionInfo{ID: s.id, State: s.state, Size: s.size, StartedAt: s.startedAt, LastSequence: s.lastSequence, AttachmentCount: len(s.attachments), HistoryAvailable: len(s.history) > 0}
 	if s.exit != nil {

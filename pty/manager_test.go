@@ -24,6 +24,23 @@ type blockingManagedFactory struct {
 	once    sync.Once
 }
 
+type identifiedManagedFactory struct {
+	process *managedTestProcess
+	pid     uint64
+}
+
+type identifiedManagedProcess struct {
+	*managedTestProcess
+	pid uint64
+}
+
+func (f *identifiedManagedFactory) StartManaged(_ context.Context, _ pty.ProcessSpec) (pty.ManagedProcess, error) {
+	f.process = newManagedTestProcess()
+	return &identifiedManagedProcess{managedTestProcess: f.process, pid: f.pid}, nil
+}
+
+func (p *identifiedManagedProcess) ProcessID() (uint64, error) { return p.pid, nil }
+
 func (f *blockingManagedFactory) StartManaged(ctx context.Context, _ pty.ProcessSpec) (pty.ManagedProcess, error) {
 	f.once.Do(func() { close(f.started) })
 	<-ctx.Done()
@@ -103,6 +120,44 @@ func (b *lockedBytes) Write(data []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.Buffer.Write(data)
+}
+
+func TestSessionProcessIDIsExplicitAndRunningOnly(t *testing.T) {
+	factory := &identifiedManagedFactory{pid: 4312}
+	manager, err := pty.NewManager(context.Background(), factory, pty.DefaultManagerConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	session, err := manager.Open(context.Background(), pty.ProcessSpec{Command: "shell", InitialSize: pty.Size{Cols: 80, Rows: 24}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pid, err := session.ProcessID(); err != nil || pid != 4312 {
+		t.Fatalf("ProcessID = %d, %v", pid, err)
+	}
+	factory.process.finish(pty.ExitStatus{Reason: pty.ExitReasonExited, Code: 0})
+	if _, err := session.Wait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := session.ProcessID(); !errors.Is(err, pty.ErrSessionExited) {
+		t.Fatalf("exited ProcessID error = %v", err)
+	}
+}
+
+func TestSessionProcessIDRejectsUnsupportedBackend(t *testing.T) {
+	manager, err := pty.NewManager(context.Background(), &managedTestFactory{}, pty.DefaultManagerConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	session, err := manager.Open(context.Background(), pty.ProcessSpec{Command: "shell", InitialSize: pty.Size{Cols: 80, Rows: 24}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := session.ProcessID(); !errors.Is(err, pty.ErrProcessIDUnavailable) {
+		t.Fatalf("ProcessID error = %v", err)
+	}
 }
 
 type collectingOutput struct{ events chan pty.OutputEvent }

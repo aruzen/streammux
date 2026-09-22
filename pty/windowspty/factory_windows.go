@@ -248,13 +248,14 @@ func startManaged(ctx context.Context, spec pty.ProcessSpec) (*managedProcess, e
 	inputWrite, outputRead = 0, 0
 
 	result := &managedProcess{
-		process: information.Process,
-		job:     job,
-		console: console,
-		input:   inputFile,
-		output:  &output{file: outputFile, observed: make(chan struct{})},
-		done:    make(chan struct{}),
-		running: true,
+		process:   information.Process,
+		processID: uint64(information.ProcessId),
+		job:       job,
+		console:   console,
+		input:     inputFile,
+		output:    &output{file: outputFile, observed: make(chan struct{})},
+		done:      make(chan struct{}),
+		running:   true,
 	}
 	if releasePseudoConsole.Find() == nil {
 		_, _, _ = releasePseudoConsole.Call(uintptr(console))
@@ -342,6 +343,7 @@ func (o *output) Read(buffer []byte) (int, error) {
 
 type managedProcess struct {
 	process     windows.Handle
+	processID   uint64
 	job         windows.Handle
 	console     windows.Handle
 	input       *os.File
@@ -365,6 +367,15 @@ type managedProcess struct {
 
 func (p *managedProcess) Output() io.Reader { return p.output }
 func (p *managedProcess) Input() io.Writer  { return p.input }
+
+func (p *managedProcess) ProcessID() (uint64, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.running || p.resourcesClosed || p.processID == 0 || p.processExitedLocked() {
+		return 0, pty.ErrProcessIDUnavailable
+	}
+	return p.processID, nil
+}
 
 func (p *managedProcess) Resize(size pty.Size) error {
 	if err := size.Validate(); err != nil {
@@ -527,3 +538,4 @@ var _ pty.Factory = Factory{}
 var _ pty.Process = (*process)(nil)
 var _ pty.ManagedFactory = ManagedFactory{}
 var _ pty.ManagedProcess = (*managedProcess)(nil)
+var _ pty.ProcessIDProvider = (*managedProcess)(nil)

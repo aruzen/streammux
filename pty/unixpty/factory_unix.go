@@ -198,6 +198,15 @@ type managedProcess struct {
 func (p *managedProcess) Output() io.Reader { return p.output }
 func (p *managedProcess) Input() io.Writer  { return p.file }
 
+func (p *managedProcess) ProcessID() (uint64, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.running || p.command.Process == nil || p.command.Process.Pid <= 0 {
+		return 0, pty.ErrProcessIDUnavailable
+	}
+	return uint64(p.command.Process.Pid), nil
+}
+
 func (p *managedProcess) Resize(size pty.Size) error {
 	if err := size.Validate(); err != nil {
 		return err
@@ -272,3 +281,4 @@ func (p *managedProcess) Close() error {
 
 var _ pty.ManagedFactory = ManagedFactory{}
 var _ pty.ManagedProcess = (*managedProcess)(nil)
+var _ pty.ProcessIDProvider = (*managedProcess)(nil)

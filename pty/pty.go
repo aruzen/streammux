@@ -8,12 +8,13 @@ import (
 )
 
 var (
-	ErrCommandRequired     = errors.New("pty: command is required")
-	ErrInvalidSize         = errors.New("pty: size must have positive columns and rows")
-	ErrInvalidMessageTypes = errors.New("pty: message types must be non-zero and distinct")
-	ErrSessionNotFound     = errors.New("pty: session not found")
-	ErrUnexpectedFrame     = errors.New("pty: unexpected frame")
-	ErrInvalidPayload      = errors.New("pty: invalid payload")
+	ErrCommandRequired      = errors.New("pty: command is required")
+	ErrInvalidSize          = errors.New("pty: size must have positive columns and rows")
+	ErrInvalidMessageTypes  = errors.New("pty: message types must be non-zero and distinct")
+	ErrSessionNotFound      = errors.New("pty: session not found")
+	ErrUnexpectedFrame      = errors.New("pty: unexpected frame")
+	ErrInvalidPayload       = errors.New("pty: invalid payload")
+	ErrProcessIDUnavailable = errors.New("pty: process ID unavailable")
 )
 
 // Size is a terminal size in character columns and rows.
@@ -105,4 +106,12 @@ type ManagedProcess interface {
 	Kill() error
 	WaitStatus() (ExitStatus, error)
 	Close() error
+}
+
+// ProcessIDProvider is an optional capability implemented by managed process
+// backends that can expose the root operating-system process identifier.
+// Keeping it separate preserves compatibility for third-party ManagedProcess
+// implementations.
+type ProcessIDProvider interface {
+	ProcessID() (uint64, error)
 }
